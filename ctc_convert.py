@@ -20,6 +20,7 @@ Test layout (raw images only for now)::
 import contextlib
 import functools
 import logging
+import os
 import re
 import time
 from collections.abc import Iterator
@@ -34,6 +35,10 @@ import zarr
 from geff.convert import convert_ctc, ctc_tiffs_to_zarr
 from geff.convert._ctc import _chunks_and_shards, _ome_dims, _register_label
 from geff.convert._scale_pyramid import generate_scale_pyramid
+from geff.core_io import read_to_memory
+from geff.core_io._base_write import write_props_arrays
+from geff_spec import GeffMetadata, RelatedObject
+from geff_spec.utils import add_or_update_props_metadata
 from tqdm import tqdm
 from yaozarrs.v06 import ImageLabel, LabelImage, LabelSource, Multiscale
 from yaozarrs.write.v06 import prepare_image
@@ -182,6 +187,49 @@ def write_label_sequence(
     _register_label(sample_path, label_name)
 
 
+def add_label_ids_to_geff(sample_path: Path, label_name: str) -> None:
+    """Add a node property with each node's id in the label image `label_name`.
+
+    Node positions are pixel coordinates, so the label under a node's centroid is used
+    directly. Nodes whose centroid is on background (including frames the label image has no
+    tiff for) are marked missing. The label image is also added to the geff's related objects.
+    """
+    geff_path = sample_path / "tracks.geff"
+    label_path = sample_path / "labels" / label_name
+    labels = zarr.open_group(label_path, mode="r")["0"]
+
+    axis_names = ["t", "y", "x"] if labels.ndim == 3 else ["t", "z", "y", "x"]
+    node_props = read_to_memory(
+        geff_path, structure_validation=False, node_props=axis_names, edge_props=[]
+    )["node_props"]
+    frames, *spatial = (np.rint(node_props[name]["values"]).astype(int) for name in axis_names)
+    ids = np.zeros(len(frames), dtype=labels.dtype)
+    for t in np.unique(frames):
+        in_frame = frames == t
+        frame = labels[int(t)]
+        ids[in_frame] = frame[tuple(coords[in_frame] for coords in spatial)]
+    missing = ids == 0
+    if missing.any():
+        logger.warning(
+            "%d of %d nodes are on background in label %s", missing.sum(), len(ids), label_name
+        )
+
+    prop_name = f"{label_name.lower().replace('-', '_')}_id"
+    props_metadata = write_props_arrays(
+        geff_path,
+        "nodes",
+        {prop_name: {"values": ids, "missing": missing if missing.any() else None}},
+    )
+    metadata = add_or_update_props_metadata(GeffMetadata.read(geff_path), props_metadata, "node")
+    metadata.related_objects = [
+        *(metadata.related_objects or []),
+        RelatedObject(
+            type="labels", path=os.path.relpath(label_path, geff_path), node_prop=prop_name
+        ),
+    ]
+    metadata.write(geff_path)
+
+
 def convert_train_sample(
     dataset_dir: Path,
     seq: str,
@@ -211,6 +259,7 @@ def convert_train_sample(
             overwrite=overwrite,
             **metadata,
         )
+        add_label_ids_to_geff(sample_path, label_name)
 
 
 def convert_train_dataset(

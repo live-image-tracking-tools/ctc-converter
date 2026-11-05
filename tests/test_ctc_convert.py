@@ -5,8 +5,11 @@ import numpy as np
 import pytest
 import tifffile
 import zarr
+from geff.core_io import read_to_memory
+from geff_spec import GeffMetadata
 
 from ctc_convert import (
+    add_label_ids_to_geff,
     get_metadata,
     convert_test_dataset,
     convert_train_dataset,
@@ -130,6 +133,72 @@ class Test_convert_train_dataset:
         with pytest.raises(FileExistsError, match="Use overwrite=True"):
             convert_train_dataset(dataset, tmp_path / "out", scales_path=scales)
         convert_train_dataset(dataset, tmp_path / "out", overwrite=True, scales_path=scales)
+
+
+class Test_label_ids_on_nodes:
+    @pytest.fixture
+    def geff_path(self, dataset: Path, tmp_path: Path, scales: Path) -> Path:
+        root = convert_train_dataset(dataset, tmp_path / "out", scales_path=scales)
+        return root / "sample_01" / "tracks.geff"
+
+    def test_each_label_is_a_related_object_with_its_own_node_prop(self, geff_path: Path):
+        metadata = GeffMetadata.read(geff_path)
+        assert {Path(r.path).name: r.node_prop for r in metadata.related_objects} == {
+            "GT-TRA": "tracklet_id",
+            "ST": "st_id",
+            "GT-SEG": "gt_seg_id",
+            "ERR-SEG": "err_seg_id",
+        }
+        assert {"st_id", "gt_seg_id", "err_seg_id"} <= set(metadata.node_props_metadata)
+
+    def test_dense_labels_match_tracklet_ids(self, geff_path: Path):
+        props = read_to_memory(geff_path)["node_props"]
+        for name in ("st_id", "err_seg_id"):
+            np.testing.assert_array_equal(props[name]["values"], props["tracklet_id"]["values"])
+            assert props[name]["missing"] is None
+
+    def test_sparse_gt_seg_is_missing_on_frames_without_labels(self, geff_path: Path):
+        props = read_to_memory(geff_path)["node_props"]
+        has_label = np.isin(props["t"]["values"], SPARSE_FRAMES)
+        gt_seg = props["gt_seg_id"]
+        np.testing.assert_array_equal(gt_seg["missing"], ~has_label)
+        np.testing.assert_array_equal(
+            gt_seg["values"][has_label], props["tracklet_id"]["values"][has_label]
+        )
+
+
+class Test_add_label_ids_to_geff:
+    def test_uses_label_under_node_and_marks_background_missing(
+        self, dataset: Path, tmp_path: Path, scales: Path
+    ):
+        sample = convert_train_dataset(dataset, tmp_path / "out", scales_path=scales) / "sample_01"
+
+        # A label image with different ids and larger objects than GT-TRA's, in which the
+        # second object is absent in the last frame.
+        new_labels = tmp_path / "new_labels"
+        new_labels.mkdir()
+        for t in range(N_FRAMES):
+            frame = np.zeros(SHAPE, dtype=np.uint16)
+            frame[3:17, 3 + t : 17 + t] = 7
+            if t < N_FRAMES - 1:
+                frame[38:52, 38:52] = 9
+            tifffile.imwrite(new_labels / f"man_seg{t:04d}.tif", frame)
+        write_label_sequence(new_labels, "man_seg*.tif", sample, "NEW")
+
+        add_label_ids_to_geff(sample, "NEW")
+
+        geff_path = sample / "tracks.geff"
+        props = read_to_memory(geff_path)["node_props"]
+        tracklet = props["tracklet_id"]["values"]
+        t = props["t"]["values"]
+        new_id = props["new_id"]
+        missing = (tracklet == 2) & (t == N_FRAMES - 1)
+        np.testing.assert_array_equal(new_id["missing"], missing)
+        np.testing.assert_array_equal(new_id["values"][tracklet == 1], 7)
+        np.testing.assert_array_equal(new_id["values"][(tracklet == 2) & ~missing], 9)
+
+        related = {Path(r.path).name: r.node_prop for r in GeffMetadata.read(geff_path).related_objects}
+        assert related["NEW"] == "new_id"
 
 
 class Test_write_label_sequence:
