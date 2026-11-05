@@ -33,7 +33,7 @@ import yaml
 import zarr
 from geff.convert import convert_ctc, ctc_tiffs_to_zarr
 from geff.convert._ctc import _chunks_and_shards, _ome_dims, _register_label
-from geff.convert._scale_pyramid import DEFAULT_SPATIAL_CHUNK_SIZE, generate_scale_pyramid
+from geff.convert._scale_pyramid import generate_scale_pyramid
 from tqdm import tqdm
 from yaozarrs.v06 import ImageLabel, LabelImage, LabelSource, Multiscale
 from yaozarrs.write.v06 import prepare_image
@@ -114,8 +114,6 @@ def write_label_sequence(
     pattern: str,
     sample_path: Path,
     label_name: str,
-    num_scale_levels: int | None = None,
-    min_chunk_size: int = DEFAULT_SPATIAL_CHUNK_SIZE,
     overwrite: bool = False,
     pixel_size: list[float] | None = None,
     pixel_unit: Any = None,
@@ -126,6 +124,7 @@ def write_label_sequence(
 
     The array always spans every frame of the sample's raw image; frames without a tiff (e.g.
     the temporally sparse GT-SEG) are left as zeros. The sample's raw image must already exist.
+    Labels are written at a single scale only, so only the original labels are distributed.
     """
     files = sorted(frame_dir.glob(pattern))
     if not files:
@@ -181,13 +180,6 @@ def write_label_sequence(
         array[t] = np.asarray(tifffile.imread(file), dtype=first.dtype)
 
     _register_label(sample_path, label_name)
-    with log_step(f"Building scale pyramid for label {label_name}"):
-        generate_scale_pyramid(
-            zarr.open_group(label_path, mode="r+"),
-            num_levels=num_scale_levels,
-            chunk_size=min_chunk_size,
-            is_label=True,
-        )
 
 
 def convert_train_sample(
@@ -216,7 +208,6 @@ def convert_train_sample(
             pattern,
             sample_path,
             label_name,
-            num_scale_levels=num_scale_levels,
             overwrite=overwrite,
             **metadata,
         )
