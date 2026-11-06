@@ -59,6 +59,7 @@ GT_TRA_LABEL = "GT-TRA"
 GT_TRA_DIR = "{seq}_GT/TRA"
 
 _FRAME_INDEX = re.compile(r"(\d+)\.tiff?$")
+_SLICE_INDEX = re.compile(r"_(\d+)_(\d+)\.tiff?$")
 
 logger = logging.getLogger(__name__)
 
@@ -114,6 +115,14 @@ def frame_index(path: Path) -> int:
     return int(match.group(1))
 
 
+def slice_index(path: Path) -> tuple[int, int]:
+    """(frame, z) encoded in a CTC slice tiff filename (e.g. `man_seg_000_013.tif` -> (0, 13))."""
+    match = _SLICE_INDEX.search(path.name)
+    if match is None:
+        raise ValueError(f"Cannot parse a slice index from filename {path.name!r}")
+    return int(match.group(1)), int(match.group(2))
+
+
 def write_label_sequence(
     frame_dir: Path,
     pattern: str,
@@ -130,6 +139,10 @@ def write_label_sequence(
     The array always spans every frame of the sample's raw image; frames without a tiff (e.g.
     the temporally sparse GT-SEG) are left as zeros. The sample's raw image must already exist.
     Labels are written at a single scale only, so only the original labels are distributed.
+
+    The tiffs are either full frames (`<name><t>.tif`) or, for the sparse 3D GT-SEG, single
+    (y, x) slices (`<name>_<t>_<z>.tif`) that are written into their (t, z) position, leaving
+    the rest of the volume as zeros.
     """
     files = sorted(frame_dir.glob(pattern))
     if not files:
@@ -138,19 +151,32 @@ def write_label_sequence(
     raw_shape = zarr.open_group(sample_path, mode="r")["0"].shape
     n_frames, frame_shape = raw_shape[0], raw_shape[1:]
 
-    indices = [frame_index(f) for f in files]
+    is_slice = [_SLICE_INDEX.search(f.name) is not None for f in files]
+    if any(is_slice) and not all(is_slice):
+        raise ValueError(f"Cannot mix slice (<t>_<z>) and full frame tiffs in {frame_dir}")
+    slices = all(is_slice)
+    indices = [slice_index(f) if slices else (frame_index(f),) for f in files]
+    item_shape = frame_shape[1:] if slices else frame_shape
+
     if len(set(indices)) != len(indices):
         raise ValueError(f"Duplicate frame indices in {frame_dir}")
-    if max(indices) >= n_frames:
+    max_frame = max(index[0] for index in indices)
+    if max_frame >= n_frames:
         raise ValueError(
-            f"Frame index {max(indices)} in {frame_dir} is out of range for "
-            f"{n_frames} raw frames"
+            f"Frame index {max_frame} in {frame_dir} is out of range for {n_frames} raw frames"
         )
+    if slices:
+        max_z = max(index[1] for index in indices)
+        if max_z >= raw_shape[1]:
+            raise ValueError(
+                f"Z index {max_z} in {frame_dir} is out of range for {raw_shape[1]} z slices"
+            )
 
     first = tifffile.imread(files[0])
-    if first.shape != frame_shape:
+    if first.shape != item_shape:
         raise ValueError(
-            f"Label frames in {frame_dir} have shape {first.shape}, raw frames {frame_shape}"
+            f"Label {'slices' if slices else 'frames'} in {frame_dir} have shape {first.shape}, "
+            f"expected {item_shape}"
         )
     if first.dtype.kind not in "iu":
         raise ValueError(f"Label images must have an integer data type, got {first.dtype}.")
@@ -179,10 +205,10 @@ def write_label_sequence(
     logger.info(
         "Writing label %s: %d tiffs into %d frames", label_name, len(files), n_frames
     )
-    for t, file in tqdm(
-        zip(indices, files, strict=True), total=len(files), desc=label_name, unit="frame"
+    for index, file in tqdm(
+        zip(indices, files, strict=True), total=len(files), desc=label_name, unit="file"
     ):
-        array[t] = np.asarray(tifffile.imread(file), dtype=first.dtype)
+        array[index] = np.asarray(tifffile.imread(file), dtype=first.dtype)
 
     _register_label(sample_path, label_name)
 

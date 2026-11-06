@@ -5,6 +5,7 @@ import numpy as np
 import pytest
 import tifffile
 import zarr
+from geff.convert import ctc_tiffs_to_zarr
 from geff.core_io import read_to_memory
 from geff_spec import GeffMetadata
 
@@ -15,12 +16,35 @@ from ctc_convert import (
     convert_train_dataset,
     find_sequences,
     frame_index,
+    slice_index,
     write_label_sequence,
 )
 
 N_FRAMES = 4
 SHAPE = (64, 64)
 SPARSE_FRAMES = (1, 3)
+N_Z = 5
+SLICE_SHAPE = (16, 16)
+
+
+def _write_3d_raw_sample(tmp_path: Path) -> Path:
+    """An OME-Zarr sample with a raw (T, Z, Y, X) image."""
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    for t in range(N_FRAMES):
+        tifffile.imwrite(raw / f"t{t:03d}.tif", np.full((N_Z, *SLICE_SHAPE), t, dtype=np.uint8))
+    sample = tmp_path / "sample"
+    ctc_tiffs_to_zarr(raw, sample)
+    return sample
+
+
+def _write_slices(label_dir: Path, slices: dict[tuple[int, int], int]) -> None:
+    """Write a 2D tiff `man_seg_<t>_<z>.tif` filled with the given label for each (t, z)."""
+    label_dir.mkdir()
+    for (t, z), label in slices.items():
+        tifffile.imwrite(
+            label_dir / f"man_seg_{t:03d}_{z:03d}.tif", np.full(SLICE_SHAPE, label, dtype=np.uint16)
+        )
 
 
 def _labels_frame(t: int) -> np.ndarray:
@@ -85,6 +109,15 @@ class Test_frame_index:
     def test_raises_without_digits(self):
         with pytest.raises(ValueError, match="Cannot parse a frame index"):
             frame_index(Path("man_seg.tif"))
+
+
+class Test_slice_index:
+    def test_parses_frame_and_z(self):
+        assert slice_index(Path("man_seg_000_013.tif")) == (0, 13)
+
+    def test_raises_for_full_frame_filename(self):
+        with pytest.raises(ValueError, match="Cannot parse a slice index"):
+            slice_index(Path("man_seg0058.tif"))
 
 
 class Test_find_sequences:
@@ -222,6 +255,57 @@ class Test_write_label_sequence:
         root = convert_train_dataset(dataset, tmp_path / "out", scales_path=scales)
         with pytest.raises(FileNotFoundError, match="No files matching"):
             write_label_sequence(tmp_path, "nothing*.tif", root / "sample_01", "BAD")
+
+
+class Test_write_label_sequence_slices:
+    def test_slots_each_slice_into_its_frame_and_z(self, tmp_path: Path):
+        sample = _write_3d_raw_sample(tmp_path)
+        # two annotated slices in frame 0, one in frame 2, none in frames 1 and 3
+        slices = {(0, 1): 1, (0, 3): 2, (2, 4): 3}
+        _write_slices(tmp_path / "seg", slices)
+
+        write_label_sequence(tmp_path / "seg", "man_seg_*.tif", sample, "GT-SEG")
+
+        labels = zarr.open_group(sample / "labels" / "GT-SEG")["0"][:]
+        expected = np.zeros((N_FRAMES, N_Z, *SLICE_SHAPE), dtype=np.uint16)
+        for (t, z), label in slices.items():
+            expected[t, z] = label
+        np.testing.assert_array_equal(labels, expected)
+
+    def test_raises_on_out_of_range_z(self, tmp_path: Path):
+        sample = _write_3d_raw_sample(tmp_path)
+        _write_slices(tmp_path / "seg", {(0, N_Z): 1})
+        with pytest.raises(ValueError, match=f"out of range for {N_Z} z slices"):
+            write_label_sequence(tmp_path / "seg", "man_seg_*.tif", sample, "GT-SEG")
+
+    def test_raises_on_out_of_range_frame(self, tmp_path: Path):
+        sample = _write_3d_raw_sample(tmp_path)
+        _write_slices(tmp_path / "seg", {(N_FRAMES, 0): 1})
+        with pytest.raises(ValueError, match=f"out of range for {N_FRAMES} raw frames"):
+            write_label_sequence(tmp_path / "seg", "man_seg_*.tif", sample, "GT-SEG")
+
+    def test_raises_on_wrong_slice_shape(self, tmp_path: Path):
+        sample = _write_3d_raw_sample(tmp_path)
+        (tmp_path / "seg").mkdir()
+        tifffile.imwrite(tmp_path / "seg" / "man_seg_000_001.tif", np.zeros((8, 8), np.uint16))
+        with pytest.raises(ValueError, match="have shape"):
+            write_label_sequence(tmp_path / "seg", "man_seg_*.tif", sample, "GT-SEG")
+
+    def test_raises_on_duplicate_slice(self, tmp_path: Path):
+        sample = _write_3d_raw_sample(tmp_path)
+        _write_slices(tmp_path / "seg", {(0, 1): 1})
+        tifffile.imwrite(tmp_path / "seg" / "other_000_001.tif", np.ones(SLICE_SHAPE, np.uint16))
+        with pytest.raises(ValueError, match="Duplicate"):
+            write_label_sequence(tmp_path / "seg", "*.tif", sample, "GT-SEG")
+
+    def test_raises_on_mixed_slices_and_full_frames(self, tmp_path: Path):
+        sample = _write_3d_raw_sample(tmp_path)
+        _write_slices(tmp_path / "seg", {(0, 1): 1})
+        tifffile.imwrite(
+            tmp_path / "seg" / "man_seg0002.tif", np.ones((N_Z, *SLICE_SHAPE), np.uint16)
+        )
+        with pytest.raises(ValueError, match="Cannot mix"):
+            write_label_sequence(tmp_path / "seg", "*.tif", sample, "GT-SEG")
 
 
 class Test_convert_test_dataset:

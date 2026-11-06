@@ -13,7 +13,7 @@ dependencies = [
 ]
 
 [tool.uv.sources]
-geff = { git = "https://github.com/live-image-tracking-tools/geff", subdirectory = "packages/geff", rev = "ctc-ome-zarr" }
+geff = { git = "https://github.com/live-image-tracking-tools/geff", subdirectory = "packages/geff", rev = "9f46b5bf44045b3d983d51cd4f202c9c3bbf1b37" }
 
 [dependency-groups]
 dev = [
