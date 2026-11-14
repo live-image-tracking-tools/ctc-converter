@@ -20,7 +20,6 @@ Test layout (raw images only for now)::
 import contextlib
 import functools
 import logging
-import os
 import re
 import time
 from collections.abc import Iterator
@@ -37,7 +36,7 @@ from geff.convert._ctc import _chunks_and_shards, _ome_dims, _register_label
 from geff.convert._scale_pyramid import generate_scale_pyramid
 from geff.core_io import read_to_memory
 from geff.core_io._base_write import write_props_arrays
-from geff_spec import GeffMetadata, RelatedObject
+from geff_spec import GeffMetadata
 from geff_spec.utils import add_or_update_props_metadata
 from tqdm import tqdm
 from yaozarrs.v06 import ImageLabel, LabelImage, LabelSource, Multiscale
@@ -218,7 +217,8 @@ def add_label_ids_to_geff(sample_path: Path, label_name: str) -> None:
 
     Node positions are pixel coordinates, so the label under a node's centroid is used
     directly. Nodes whose centroid is on background (including frames the label image has no
-    tiff for) are marked missing. The label image is also added to the geff's related objects.
+    tiff for) are marked missing. The label image is not added to the geff's related objects:
+    only GT-TRA, from which the graph was built, is linked there.
     """
     geff_path = sample_path / "tracks.geff"
     label_path = sample_path / "labels" / label_name
@@ -247,12 +247,6 @@ def add_label_ids_to_geff(sample_path: Path, label_name: str) -> None:
         {prop_name: {"values": ids, "missing": missing if missing.any() else None}},
     )
     metadata = add_or_update_props_metadata(GeffMetadata.read(geff_path), props_metadata, "node")
-    metadata.related_objects = [
-        *(metadata.related_objects or []),
-        RelatedObject(
-            type="labels", path=os.path.relpath(label_path, geff_path), node_prop=prop_name
-        ),
-    ]
     metadata.write(geff_path)
 
 
