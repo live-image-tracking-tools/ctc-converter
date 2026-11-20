@@ -174,13 +174,12 @@ class Test_label_ids_on_nodes:
         root = convert_train_dataset(dataset, tmp_path / "out", scales_path=scales)
         return root / "sample_01" / "tracks.geff"
 
-    def test_each_label_is_a_related_object_with_its_own_node_prop(self, geff_path: Path):
+    def test_only_gt_tra_is_a_related_object_and_each_label_has_its_own_node_prop(
+        self, geff_path: Path
+    ):
         metadata = GeffMetadata.read(geff_path)
         assert {Path(r.path).name: r.node_prop for r in metadata.related_objects} == {
             "GT-TRA": "tracklet_id",
-            "ST": "st_id",
-            "GT-SEG": "gt_seg_id",
-            "ERR-SEG": "err_seg_id",
         }
         assert {"st_id", "gt_seg_id", "err_seg_id"} <= set(metadata.node_props_metadata)
 
@@ -231,7 +230,7 @@ class Test_add_label_ids_to_geff:
         np.testing.assert_array_equal(new_id["values"][(tracklet == 2) & ~missing], 9)
 
         related = {Path(r.path).name: r.node_prop for r in GeffMetadata.read(geff_path).related_objects}
-        assert related["NEW"] == "new_id"
+        assert "NEW" not in related
 
 
 class Test_write_label_sequence:
