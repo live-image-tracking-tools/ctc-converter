@@ -277,8 +277,12 @@ def convert_train_sample(
             **metadata,
         )
     for label_name, (subdir, pattern) in TRAIN_LABELS.items():
+        frame_dir = dataset_dir / subdir.format(seq=seq)
+        if not frame_dir.is_dir():
+            print(f"Skipping the not found {frame_dir}")
+            continue
         write_label_sequence(
-            dataset_dir / subdir.format(seq=seq),
+            frame_dir,
             pattern,
             sample_path,
             label_name,
